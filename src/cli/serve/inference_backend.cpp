@@ -46,9 +46,9 @@
 #include "src/models/qwen/hip/detail/attention_policy.hpp"
 #include "src/models/qwen/hip/dflash.hpp"
 #include "src/models/qwen/hip/executor.hpp"
+#include "src/models/qwen35_moe/engine.hpp"
 #include "src/models/qwen38_flash_next/continuation_adapter.hpp"
 #include "src/models/qwen38_flash_next/engine.hpp"
-#include "src/models/qwen35_moe/engine.hpp"
 #endif
 
 namespace gufo::server {
@@ -2968,7 +2968,8 @@ private:
 
 class Qwen35MoeTextRunnerState final : public TextRunnerState {
 public:
-  explicit Qwen35MoeTextRunnerState(std::unique_ptr<models::qwen35_moe::Session> session)
+  explicit Qwen35MoeTextRunnerState(
+      std::unique_ptr<models::qwen35_moe::Session> session)
       : session_(std::move(session)) {}
 
   void Invalidate() noexcept override {
@@ -2987,11 +2988,14 @@ public:
 
   [[nodiscard]] TextRunnerMeasuredResources MeasuredResources()
       const noexcept override {
-    return {.per_request_state_bytes = session_ ? session_->AllocatedBytes() : 0,
-            .temporary_scratch_bytes = 0};
+    return {
+        .per_request_state_bytes = session_ ? session_->AllocatedBytes() : 0,
+        .temporary_scratch_bytes = 0};
   }
 
-  [[nodiscard]] models::qwen35_moe::Session& session() const { return *session_; }
+  [[nodiscard]] models::qwen35_moe::Session& session() const {
+    return *session_;
+  }
   [[nodiscard]] std::size_t position() const noexcept { return position_; }
   void set_position(std::size_t pos) noexcept { position_ = pos; }
 
@@ -3015,22 +3019,25 @@ public:
         .model_id = model_->ModelName(),
         .state_abi = "qwen35moe-v1",
         .max_context = max_context_,
-        .capabilities = TextRunnerCapabilities{
-            .incremental_prefill = true,
-            .snapshot = false,
-            .fork = false,
-            .final_token_advance_required = false,
-            .incremental_text_is_exact = true,
-            .prefix_reuse = true,
-        },
+        .capabilities =
+            TextRunnerCapabilities{
+                .incremental_prefill = true,
+                .snapshot = false,
+                .fork = false,
+                .final_token_advance_required = false,
+                .incremental_text_is_exact = true,
+                .prefix_reuse = true,
+            },
     };
   }
 
   [[nodiscard]] TextRunnerResourceClaim ResourceClaim() const override {
+    const auto session_bytes =
+        model_->SessionBytes(core::SessionMode::kAutoregressive, max_context_);
     return {
         .resident_weights_bytes = model_->ResidentBytes(),
-        .state_capacity_bytes = std::nullopt,
-        .per_request_state_bytes = std::nullopt,
+        .state_capacity_bytes = session_bytes,
+        .per_request_state_bytes = session_bytes,
         .temporary_scratch_bytes = std::nullopt,
         .retained_snapshot_capacity_bytes = std::nullopt,
         .retained_snapshot_ceiling_bytes = std::nullopt,
@@ -3118,7 +3125,8 @@ public:
       std::size_t offset, std::size_t max_input_tokens) const override {
     auto& moe = dynamic_cast<Qwen35MoeTextRunnerState&>(state);
     if (offset != moe.position()) {
-      throw std::logic_error("Qwen3.5-MoE prefill offset does not match retained state");
+      throw std::logic_error(
+          "Qwen3.5-MoE prefill offset does not match retained state");
     }
     if (offset >= prompt.size()) {
       throw std::logic_error("Qwen3.5-MoE prefill has no remaining input");
@@ -3492,7 +3500,8 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
                 std::move(resolved_disk_cache_config), ram_cache_config);
   }
   if (reader->GetMetadataString("general.architecture") == "qwen35moe") {
-    if (!tokenization::QwenChatTemplate::ValidateGgufTemplate(*reader, &load_error)) {
+    if (!tokenization::QwenChatTemplate::ValidateGgufTemplate(*reader,
+                                                              &load_error)) {
       SetError(error, "Unsupported Qwen3.5-MoE chat template: " + load_error);
       return false;
     }
@@ -3886,13 +3895,14 @@ bool InferenceBackend::load(
   }
 }
 
-bool InferenceBackend::load(
-    std::shared_ptr<models::qwen35_moe::Model> model, std::string* error,
-    std::uint32_t max_context, std::size_t session_count,
-    TextPrefillPolicy prefill_policy, TextSchedulerPolicy scheduler_policy,
-    TextSpeculativeConfig speculative_config,
-    TextDiskCacheConfig disk_cache_config,
-    TextRunnerRamCacheOptions ram_cache_config) {
+bool InferenceBackend::load(std::shared_ptr<models::qwen35_moe::Model> model,
+                            std::string* error, std::uint32_t max_context,
+                            std::size_t session_count,
+                            TextPrefillPolicy prefill_policy,
+                            TextSchedulerPolicy scheduler_policy,
+                            TextSpeculativeConfig speculative_config,
+                            TextDiskCacheConfig disk_cache_config,
+                            TextRunnerRamCacheOptions ram_cache_config) {
   (void)speculative_config;
   (void)disk_cache_config;
   if (model == nullptr) {
@@ -3907,7 +3917,8 @@ bool InferenceBackend::load(
     return false;
   }
   if (max_context == 0 || max_context > model->MaxContext()) {
-    SetError(error, "HTTP context exceeds the loaded Qwen3.5-MoE model context");
+    SetError(error,
+             "HTTP context exceeds the loaded Qwen3.5-MoE model context");
     return false;
   }
   try {

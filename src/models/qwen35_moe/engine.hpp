@@ -61,11 +61,15 @@ public:
   }
   [[nodiscard]] std::string ModelName() const;
   [[nodiscard]] const Config& config() const noexcept { return config_; }
-  [[nodiscard]] const ModelWeights& weights() const noexcept { return *weights_; }
+  [[nodiscard]] const ModelWeights& weights() const noexcept {
+    return *weights_;
+  }
   [[nodiscard]] const tokenization::QwenTokenizer& tokenizer() const noexcept {
     return *tokenizer_;
   }
   [[nodiscard]] std::size_t ResidentBytes() const noexcept;
+  [[nodiscard]] std::size_t SessionBytes(core::SessionMode mode,
+                                         std::uint32_t context) const noexcept;
   [[nodiscard]] const std::shared_ptr<qwen::vision::Encoder>& VisionEncoder()
       const noexcept {
     return vision_;

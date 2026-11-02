@@ -3,6 +3,7 @@
 
 #if defined(ENGINE_ENABLE_HIP)
 #include <hip/hip_runtime.h>
+
 #include <algorithm>
 #include <cstdint>
 #include <memory>
@@ -11,8 +12,8 @@
 #include <vector>
 
 #include "src/models/qwen35_moe/config.hpp"
-#include "src/models/qwen35_moe/weights.hpp"
 #include "src/models/qwen35_moe/hip/kernels.hpp"
+#include "src/models/qwen35_moe/weights.hpp"
 
 namespace gufo::models::qwen35_moe::hip {
 
@@ -21,7 +22,8 @@ struct GpuState {
   static constexpr uint32_t kMaxChunk{4096};
   uint32_t* d_token_ids{nullptr};
 
-  // Streams & Events for concurrent multi-queue execution (Compute 0 + 3D overlap)
+  // Streams & Events for concurrent multi-queue execution (Compute 0 + 3D
+  // overlap)
   hipStream_t main_stream{nullptr};
   hipStream_t side_stream{nullptr};
   hipEvent_t side_start{nullptr};
@@ -91,6 +93,7 @@ struct GpuState {
   std::vector<std::pair<float, uint32_t>> h_probs;
 
   std::vector<void*> allocations;
+  std::size_t allocated_bytes{0};
 
   void Allocate(const Config& cfg, uint32_t max_ctx);
   void Free();
@@ -98,19 +101,13 @@ struct GpuState {
   ~GpuState() { Free(); }
 };
 
-void ForwardModelGpu(
-    uint32_t token_id,
-    uint32_t pos,
-    const ModelWeights& weights,
-    GpuState& state,
-    std::span<float> out_logits);
+void ForwardModelGpu(uint32_t token_id, uint32_t pos,
+                     const ModelWeights& weights, GpuState& state,
+                     std::span<float> out_logits);
 
-void ForwardModelGpuChunk(
-    std::span<const uint32_t> tokens,
-    uint32_t pos0,
-    const ModelWeights& weights,
-    GpuState& state,
-    std::span<float> out_logits);
+void ForwardModelGpuChunk(std::span<const uint32_t> tokens, uint32_t pos0,
+                          const ModelWeights& weights, GpuState& state,
+                          std::span<float> out_logits);
 
 }  // namespace gufo::models::qwen35_moe::hip
 

@@ -127,6 +127,20 @@ std::string Model::ModelName() const {
 std::size_t Model::ResidentBytes() const noexcept {
   return reader_ ? reader_->GetSize() : 0;
 }
+std::size_t Model::SessionBytes(core::SessionMode mode,
+                                std::uint32_t context) const noexcept {
+  (void)mode;
+  if (context == 0) {
+    context = options_.max_context;
+  }
+  const uint32_t full_layers = config_.TotalFullAttentionLayers();
+  const size_t kv_elements = static_cast<size_t>(full_layers) *
+                             config_.num_kv_heads * context * config_.head_dim;
+  const size_t kv_bytes = 2 * kv_elements * sizeof(float);
+  // Activations, SSM states, host scratch, and working buffers (~2.15 GB actual, 2.5 GB claim upper bound)
+  constexpr size_t kWorkingBuffers = 2560ULL * 1024ULL * 1024ULL;
+  return kv_bytes + kWorkingBuffers;
+}
 
 #if defined(ENGINE_ENABLE_HIP)
 Session::Session(std::shared_ptr<const Model> model, std::uint32_t max_context)
@@ -167,6 +181,9 @@ std::size_t Session::AllocatedBytes() const noexcept {
   bytes += scratch_.AllocatedBytes();
   bytes += logits_.capacity() * sizeof(float);
   bytes += tokens_.capacity() * sizeof(std::int32_t);
+#if defined(ENGINE_ENABLE_HIP)
+  bytes += gpu_state_.allocated_bytes;
+#endif
   return bytes;
 }
 
@@ -185,8 +202,8 @@ bool Session::Sync(std::span<const std::int32_t> prompt,
   if (prompt.size() > max_context_) {
     if (error_msg) {
       *error_msg = "Prompt length (" + std::to_string(prompt.size()) +
-                   ") exceeds maximum context (" + std::to_string(max_context_) +
-                   ")";
+                   ") exceeds maximum context (" +
+                   std::to_string(max_context_) + ")";
     }
     return false;
   }
@@ -205,8 +222,7 @@ bool Session::Sync(std::span<const std::int32_t> prompt,
   tokens_.resize(common_prefix);
 
 #if defined(ENGINE_ENABLE_HIP)
-  constexpr std::size_t kChunkSize = hip::GpuState::kMaxChunk;
-  for (std::size_t i = common_prefix; i < prompt.size(); i += kChunkSize) {
+  for (std::size_t i = common_prefix; i < prompt.size();) {
     if (cancellation_check_ && cancellation_check_()) {
       if (error_msg) {
         *error_msg = "Execution cancelled";
@@ -214,7 +230,21 @@ bool Session::Sync(std::span<const std::int32_t> prompt,
       return false;
     }
 
-    const std::size_t chunk_n = std::min(kChunkSize, prompt.size() - i);
+    // Adaptive chunk sizing: bound causal attention quadratic work per chunk
+    // to prevent GPU monopolization / Windows WDDM driver watchdog (TdrDelay)
+    // timeouts.
+    std::size_t target_chunk = hip::GpuState::kMaxChunk;
+    if (i >= 65536) {
+      target_chunk = 256;
+    } else if (i >= 32768) {
+      target_chunk = 512;
+    } else if (i >= 16384) {
+      target_chunk = 1024;
+    } else if (i >= 8192) {
+      target_chunk = 2048;
+    }
+
+    const std::size_t chunk_n = std::min(target_chunk, prompt.size() - i);
     const bool is_last = (i + chunk_n == prompt.size());
     std::span<float> out_logits =
         is_last ? std::span<float>(logits_) : std::span<float>{};
@@ -224,12 +254,8 @@ bool Session::Sync(std::span<const std::int32_t> prompt,
       u_tokens[c] = static_cast<std::uint32_t>(prompt[i + c]);
     }
 
-    hip::ForwardModelGpuChunk(
-        u_tokens,
-        static_cast<std::uint32_t>(i),
-        model_->weights(),
-        gpu_state_,
-        out_logits);
+    hip::ForwardModelGpuChunk(u_tokens, static_cast<std::uint32_t>(i),
+                              model_->weights(), gpu_state_, out_logits);
     std::string hip_err;
     if (hip::TakeHipError(&hip_err)) {
       if (error_msg) {
@@ -243,6 +269,7 @@ bool Session::Sync(std::span<const std::int32_t> prompt,
     for (std::size_t c = 0; c < chunk_n; ++c) {
       tokens_.push_back(prompt[i + c]);
     }
+    i += chunk_n;
   }
 #else
   for (std::size_t i = common_prefix; i < prompt.size(); ++i) {
@@ -279,13 +306,14 @@ bool Session::Evaluate(std::int32_t token, std::string* error_msg) {
   }
 
 #if defined(ENGINE_ENABLE_HIP)
-  hip::ForwardModelGpu(static_cast<std::uint32_t>(token), pos, model_->weights(),
-                       gpu_state_, std::span<float>(logits_));
+  hip::ForwardModelGpu(static_cast<std::uint32_t>(token), pos,
+                       model_->weights(), gpu_state_,
+                       std::span<float>(logits_));
   std::string hip_err;
   if (hip::TakeHipError(&hip_err)) {
     if (error_msg) {
-      *error_msg = "Qwen 3.5 MoE evaluate failed at pos " + std::to_string(pos) +
-                   ": " + hip_err;
+      *error_msg = "Qwen 3.5 MoE evaluate failed at pos " +
+                   std::to_string(pos) + ": " + hip_err;
     }
     valid_ = false;
     return false;
@@ -301,10 +329,8 @@ bool Session::Evaluate(std::int32_t token, std::string* error_msg) {
 }
 
 bool Session::DecodeStep(std::size_t max_tokens,
-                         sampling::SamplerState& sampler,
-                         DecodeResult* result,
-                         std::string* error_msg,
-                         bool stop_at_eos) {
+                         sampling::SamplerState& sampler, DecodeResult* result,
+                         std::string* error_msg, bool stop_at_eos) {
   if (!valid_ || logits_.empty()) {
     if (error_msg) {
       *error_msg = "Session has not been synchronized with a prompt";

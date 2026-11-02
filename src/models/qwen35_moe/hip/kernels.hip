@@ -2801,7 +2801,54 @@ __global__ void AttentionPrefillTiledKernel(
     }
     __syncthreads();
 
-    if (kt <= pos_a || kt <= pos_b) {
+    if (kt + kKvTile <= pos_a && kt + kKvTile <= pos_b && kt + kKvTile <= seq_end) {
+#pragma unroll
+      for (uint32_t j = 0; j < kKvTile; ++j) {
+        const float4 ka = reinterpret_cast<const float4*>(&s_k[j][lane_id * kPerLane])[0];
+        const float4 kb = reinterpret_cast<const float4*>(&s_k[j][lane_id * kPerLane])[1];
+        float dot_a = qfa[0] * ka.x + qfa[1] * ka.y + qfa[2] * ka.z + qfa[3] * ka.w +
+                      qfa[4] * kb.x + qfa[5] * kb.y + qfa[6] * kb.z + qfa[7] * kb.w;
+        float dot_b = qfb[0] * ka.x + qfb[1] * ka.y + qfb[2] * ka.z + qfb[3] * ka.w +
+                      qfb[4] * kb.x + qfb[5] * kb.y + qfb[6] * kb.z + qfb[7] * kb.w;
+#pragma unroll
+        for (int o = 16; o > 0; o >>= 1) {
+          dot_a += __shfl_xor(dot_a, o);
+          dot_b += __shfl_xor(dot_b, o);
+        }
+        const float4 va = reinterpret_cast<const float4*>(&s_v[j][lane_id * kPerLane])[0];
+        const float4 vb = reinterpret_cast<const float4*>(&s_v[j][lane_id * kPerLane])[1];
+
+        const float score_a = dot_a * kScale;
+        const float m_new_a = fmaxf(m_a, score_a);
+        const float alpha_a = expf(m_a - m_new_a);
+        const float beta_a = expf(score_a - m_new_a);
+        l_a = l_a * alpha_a + beta_a;
+        acc_a[0] = acc_a[0] * alpha_a + beta_a * va.x;
+        acc_a[1] = acc_a[1] * alpha_a + beta_a * va.y;
+        acc_a[2] = acc_a[2] * alpha_a + beta_a * va.z;
+        acc_a[3] = acc_a[3] * alpha_a + beta_a * va.w;
+        acc_a[4] = acc_a[4] * alpha_a + beta_a * vb.x;
+        acc_a[5] = acc_a[5] * alpha_a + beta_a * vb.y;
+        acc_a[6] = acc_a[6] * alpha_a + beta_a * vb.z;
+        acc_a[7] = acc_a[7] * alpha_a + beta_a * vb.w;
+        m_a = m_new_a;
+
+        const float score_b = dot_b * kScale;
+        const float m_new_b = fmaxf(m_b, score_b);
+        const float alpha_b = expf(m_b - m_new_b);
+        const float beta_b = expf(score_b - m_new_b);
+        l_b = l_b * alpha_b + beta_b;
+        acc_b[0] = acc_b[0] * alpha_b + beta_b * va.x;
+        acc_b[1] = acc_b[1] * alpha_b + beta_b * va.y;
+        acc_b[2] = acc_b[2] * alpha_b + beta_b * va.z;
+        acc_b[3] = acc_b[3] * alpha_b + beta_b * va.w;
+        acc_b[4] = acc_b[4] * alpha_b + beta_b * vb.x;
+        acc_b[5] = acc_b[5] * alpha_b + beta_b * vb.y;
+        acc_b[6] = acc_b[6] * alpha_b + beta_b * vb.z;
+        acc_b[7] = acc_b[7] * alpha_b + beta_b * vb.w;
+        m_b = m_new_b;
+      }
+    } else if (kt <= pos_a || kt <= pos_b) {
 #pragma unroll
       for (uint32_t j = 0; j < kKvTile; ++j) {
         if (kt + j >= seq_end) break;
